@@ -86,7 +86,7 @@ func sendFlinkLogToVector(
 	err := json.Unmarshal([]byte(rawMsg), &flinkRaw)
 
 	// Fixed fields: time (RFC3339 format)
-	finalMap["time"] = time.UnixMilli(timestamp).UTC().Format("2006-01-02T15:04:05.000000Z")
+	finalMap["timestamp"] = time.UnixMilli(timestamp).UTC().Format("2006-01-02T15:04:05.000000Z")
 
 	if err == nil {
 		// --- IF IT IS JSON: Map Flink fields to Vector fields ---
