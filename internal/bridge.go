@@ -160,15 +160,8 @@ func processLogWorker(ctx context.Context, wq *workerQueue) {
 
 					if len(flinkBatch) >= 200 {
 						sendFlinkLogToVector(ctx, wq.Config, strings.Join(flinkBatch, "\n"))
-						wq.mu.Lock()
-						wq.Processed += int64(len(flinkBatch))
-						flinkBatch = flinkBatch[:0]
-						wq.mu.Unlock()
-
-						if *event.Timestamp > time.UnixMilli(wq.LastSaveTS).Add(10*time.Second).UnixMilli() {
-							wq.LastSaveTS = *event.Timestamp
-							saveCheckpoint(wq)
-						}
+						saveCheckpoint(wq, int64(len(flinkBatch)), lastTS)
+						flinkBatch = nil
 					}
 				}
 			default:
@@ -177,34 +170,37 @@ func processLogWorker(ctx context.Context, wq *workerQueue) {
 		case <-ticker.C:
 			if len(flinkBatch) > 0 {
 				sendFlinkLogToVector(ctx, wq.Config, strings.Join(flinkBatch, "\n"))
-				wq.mu.Lock()
-				wq.Processed += int64(len(flinkBatch))
-				wq.LastSaveTS = lastTS
-				flinkBatch = flinkBatch[:0]
-				wq.mu.Unlock()
-				saveCheckpoint(wq)
+				saveCheckpoint(wq, int64(len(flinkBatch)), lastTS)
+				flinkBatch = nil
 			}
 
 		case <-ctx.Done():
 			if len(flinkBatch) > 0 {
-				sendFlinkLogToVector(ctx, wq.Config, strings.Join(flinkBatch, "\n"))
-				wq.mu.Lock()
-				wq.Processed += int64(len(flinkBatch))
-				wq.LastSaveTS = lastTS
-				flinkBatch = flinkBatch[:0]
-				wq.mu.Unlock()
-				saveCheckpoint(wq)
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				sendFlinkLogToVector(shutdownCtx, wq.Config, strings.Join(flinkBatch, "\n"))
+				cancel()
+
+				saveCheckpoint(wq, int64(len(flinkBatch)), lastTS)
+				flinkBatch = nil
 			}
 			return
 		}
 	}
 }
 
-func saveCheckpoint(wq *workerQueue) {
-	wq.CheckpointManager.Save(wq.GroupConfig.Name, wq.LastSaveTS)
-	log.Printf("[%s] Log event processed: %d@%v",
-		wq.GroupConfig.Name, wq.Processed,
-		time.UnixMilli(wq.LastSaveTS))
+func saveCheckpoint(wq *workerQueue, processed int64, lastTS int64) {
+	wq.mu.Lock()
+	defer wq.mu.Unlock()
+
+	wq.Processed += processed
+
+	if lastTS > wq.LastSaveTS {
+		wq.LastSaveTS = lastTS
+		wq.CheckpointManager.Save(wq.GroupConfig.Name, wq.LastSaveTS)
+		log.Printf("[%s] Log event processed: %d@%v",
+			wq.GroupConfig.Name, wq.Processed,
+			time.UnixMilli(wq.LastSaveTS))
+	}
 }
 
 func isErrorMessage(msg string) bool {
