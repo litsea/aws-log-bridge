@@ -33,7 +33,6 @@ func StartLogWatcher(
 				time.Sleep(time.Second * 5)
 			} else {
 				lastTS = newTS
-				cm.Save(gc.Name, lastTS)
 			}
 
 			// 2. Sequential Gap: Wait for the interval AFTER the work is done
@@ -63,10 +62,16 @@ func pollAndForwardLog(
 	// We should handle pagination to ensure we don't skip data in one tick.
 	currentTS := lastTS
 
+	log.Printf("[%s] pollAndForwardLog: %v", gc.Name, time.UnixMilli(currentTS))
+	processed := 0
 	for {
 		output, err := client.FilterLogEvents(ctx, input)
 		if err != nil {
-			return currentTS, fmt.Errorf("pollAndForwardLog FilterLogEvents %s: %w", gc.Name, err)
+			return currentTS, fmt.Errorf("[%s] pollAndForwardLog FilterLogEvents: %w", gc.Name, err)
+		}
+
+		if len(output.Events) == 0 {
+			return currentTS + 1, nil
 		}
 
 		for _, event := range output.Events {
@@ -78,11 +83,15 @@ func pollAndForwardLog(
 			processLogEvent(ctx, event, gc, conf)
 		}
 
+		processed += len(output.Events)
+		cm.Save(gc.Name, currentTS)
+		log.Printf("[%s] Log events processed: %d@%s, next: %v",
+			gc.Name, processed, time.UnixMilli(currentTS), output.NextToken != nil)
+		processed = 0
+
 		// Pagination: if batch is large, follow the token
 		if output.NextToken == nil {
 			break
-		} else {
-			cm.Save(gc.Name, currentTS)
 		}
 		input.NextToken = output.NextToken
 
