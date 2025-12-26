@@ -1,0 +1,15 @@
+env: local
+poll_interval: 5s
+
+sentry_dsn: "https://xx@sentry.xx.com/123"
+vector_endpoint: "https://vector.xx.com/aws-log"
+vector_auth:
+  username: "user"
+  password: "pass"
+
+log_groups:
+  - name: "/aws/flink/xx"
+    type: flink
+    service: "prefix-app-service-dev" # <prefix>-<app>-<service>-<env>
+    sentry_enabled: true
+    vector_enabled: true
