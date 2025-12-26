@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -19,6 +21,8 @@ var ServeCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "serve",
 	Run: func(cmd *cobra.Command, args []string) {
+		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+
 		confData, err := os.ReadFile("config.yml")
 		if err != nil {
 			log.Fatalf("Failed to read config: %v", err)
@@ -40,20 +44,38 @@ var ServeCmd = &cobra.Command{
 		}
 		defer sentry.Flush(2 * time.Second)
 
-		ctx := context.TODO()
+		ctx, cancel := context.WithCancel(context.Background())
+
 		awsCfg, err := config.LoadDefaultConfig(ctx)
 		if err != nil {
 			log.Fatalf("AWS SDK init failed: %v", err)
 		}
 		cwClient := cloudwatchlogs.NewFromConfig(awsCfg)
 
+		cm := internal.NewCheckpointManager()
+
 		for _, gc := range conf.LogGroups {
-			go internal.StartLogWatcher(ctx, cwClient, gc, conf)
+			go internal.StartLogWatcher(ctx, cm, cwClient, gc, conf)
 		}
 
 		log.Println("LogBridge started.")
-		select {}
+
+		waitForShutdown(cancel)
+
+		log.Println("Waiting 5s for final cleanups...")
+		time.Sleep(5 * time.Second)
+		log.Println("LogBridge stopped.")
 	},
+}
+
+func waitForShutdown(cancel context.CancelFunc) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	sig := <-sigChan
+	log.Printf("Signal %v received.", sig)
+
+	cancel() // Trigger ctx.Done() in all goroutines
 }
 
 func init() {

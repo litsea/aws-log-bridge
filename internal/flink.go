@@ -15,6 +15,17 @@ var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
 
+type FlinkLog struct {
+	ApplicationARN       string `json:"applicationARN"`
+	ApplicationVersionId string `json:"applicationVersionId"`
+	LocationInformation  string `json:"locationInformation"`
+	Logger               string `json:"logger"`
+	Message              string `json:"message"`
+	MessageType          string `json:"messageType"`
+	ThreadName           string `json:"threadName"`
+	ThrowableInformation string `json:"throwableInformation"`
+}
+
 func sendFlinkLogToSentry(raw, env, group, stream string) {
 	var f FlinkLog
 	err := json.Unmarshal([]byte(raw), &f)
