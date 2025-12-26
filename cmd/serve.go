@@ -28,6 +28,10 @@ var ServeCmd = &cobra.Command{
 			log.Fatalf("Failed to parse config: %v", err)
 		}
 
+		if len(conf.LogGroups) == 0 {
+			log.Fatalf("No log groups found in config")
+		}
+
 		if err := sentry.Init(sentry.ClientOptions{
 			Dsn:         conf.SentryDSN,
 			Environment: conf.Env,

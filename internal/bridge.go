@@ -57,12 +57,12 @@ func StartLogWatcher(ctx context.Context, client *cloudwatchlogs.Client, gc Grou
 			switch gc.Type {
 			case LogTypeFlink:
 				// Sentry: only ERROR/Exception
-				if gc.SentryEnabled && isErrorMessage(msg) {
+				if gc.SentryEnabled && global.SentryDSN != "" && isErrorMessage(msg) {
 					sendFlinkLogToSentry(msg, global.Env, gc.Name, stream)
 				}
 
 				// Vector: all
-				if gc.VectorEnabled {
+				if gc.VectorEnabled && global.VectorEndpoint != "" {
 					sendFlinkLogToVector(ctx, global, gc, msg, stream, ts)
 				}
 			default:
