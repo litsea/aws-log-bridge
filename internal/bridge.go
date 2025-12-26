@@ -26,7 +26,7 @@ func StartLogWatcher(
 		default:
 			// 1. Perform the sync work
 			// This call is synchronous. The loop waits here until it's finished.
-			newTS, err := pollAndForwardLog(ctx, client, gc, conf, lastTS)
+			newTS, err := pollAndForwardLog(ctx, cm, client, gc, conf, lastTS)
 			if err != nil {
 				log.Printf("[%s] Sync failed: %v", gc.Name, err)
 				// If AWS throttles or network is down, wait a bit longer before retrying
@@ -51,7 +51,7 @@ func StartLogWatcher(
 }
 
 func pollAndForwardLog(
-	ctx context.Context, client *cloudwatchlogs.Client,
+	ctx context.Context, cm *CheckpointManager, client *cloudwatchlogs.Client,
 	gc GroupConfig, conf Config, lastTS int64,
 ) (int64, error) {
 	input := &cloudwatchlogs.FilterLogEventsInput{
@@ -81,6 +81,8 @@ func pollAndForwardLog(
 		// Pagination: if batch is large, follow the token
 		if output.NextToken == nil {
 			break
+		} else {
+			cm.Save(gc.Name, currentTS)
 		}
 		input.NextToken = output.NextToken
 
