@@ -12,7 +12,7 @@ import (
 )
 
 var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
+	Timeout: 30 * time.Second,
 }
 
 type FlinkLog struct {
@@ -75,9 +75,9 @@ func sendFlinkLogToSentry(raw, env, group, stream string) {
 	sentry.CaptureEvent(event)
 }
 
-func sendFlinkLogToVector(
-	ctx context.Context, conf Config, gc GroupConfig, rawMsg, stream string, timestamp int64,
-) {
+func buildFlinkLogToVector(
+	gc GroupConfig, rawMsg, stream string, timestamp int64,
+) map[string]interface{} {
 	// 1. Prepare the base map for final JSON
 	finalMap := make(map[string]interface{})
 
@@ -122,10 +122,14 @@ func sendFlinkLogToVector(
 	finalMap["log_stream"] = stream
 	finalMap["container_name"] = gc.Service
 
-	// 4. Marshal and Send
-	data, _ := json.Marshal(finalMap)
+	return finalMap
+}
+
+func sendFlinkLogToVector(
+	ctx context.Context, conf Config, data string,
+) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		conf.VectorEndpoint, bytes.NewBuffer(data))
+		conf.VectorEndpoint, bytes.NewBufferString(data))
 	if err != nil {
 		return
 	}
@@ -141,7 +145,6 @@ func sendFlinkLogToVector(
 		return
 	}
 
-	// FIX (errcheck): properly handle body close
 	defer func() {
 		_ = resp.Body.Close()
 	}()

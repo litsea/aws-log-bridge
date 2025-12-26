@@ -2,14 +2,26 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 )
+
+type workerQueue struct {
+	mu                sync.RWMutex
+	EventChan         chan types.FilteredLogEvent
+	CheckpointManager *CheckpointManager
+	Config            Config
+	GroupConfig       GroupConfig
+	LastSaveTS        int64
+	Processed         int64
+}
 
 func StartLogWatcher(
 	ctx context.Context, cm *CheckpointManager, client *cloudwatchlogs.Client,
@@ -18,9 +30,15 @@ func StartLogWatcher(
 	lastTS := cm.Get(gc.Name)
 	log.Printf("[%s] Watcher started at: %v", gc.Name, time.UnixMilli(lastTS))
 
-	workerQueue := make(chan types.FilteredLogEvent, 10000)
-	for i := 0; i < 50; i++ {
-		go processLogWorker(ctx, workerQueue, gc, conf)
+	wq := &workerQueue{
+		EventChan:         make(chan types.FilteredLogEvent, 10000),
+		CheckpointManager: cm,
+		Config:            conf,
+		GroupConfig:       gc,
+		LastSaveTS:        lastTS,
+	}
+	for i := 0; i < 20; i++ {
+		go processLogWorker(ctx, wq)
 	}
 
 	for {
@@ -31,7 +49,7 @@ func StartLogWatcher(
 		default:
 			// 1. Perform the sync work
 			// This call is synchronous. The loop waits here until it's finished.
-			newTS, err := pollAndForwardLog(ctx, cm, client, workerQueue, gc, lastTS)
+			newTS, err := pollAndForwardLog(ctx, cm, client, wq, lastTS)
 			if err != nil {
 				log.Printf("[%s] Sync failed: %v", gc.Name, err)
 				// If AWS throttles or network is down, wait a bit longer before retrying
@@ -56,10 +74,10 @@ func StartLogWatcher(
 
 func pollAndForwardLog(
 	ctx context.Context, cm *CheckpointManager, client *cloudwatchlogs.Client,
-	logQueue chan types.FilteredLogEvent, gc GroupConfig, lastTS int64,
+	wq *workerQueue, lastTS int64,
 ) (int64, error) {
 	input := &cloudwatchlogs.FilterLogEventsInput{
-		LogGroupName: &gc.Name,
+		LogGroupName: &wq.GroupConfig.Name,
 		StartTime:    &lastTS,
 	}
 
@@ -67,12 +85,12 @@ func pollAndForwardLog(
 	// We should handle pagination to ensure we don't skip data in one tick.
 	currentTS := lastTS
 
-	log.Printf("[%s] pollAndForwardLog: %v", gc.Name, time.UnixMilli(currentTS))
-	processed := 0
+	log.Printf("[%s] pollAndForwardLog: %v", wq.GroupConfig.Name, time.UnixMilli(currentTS))
 	for {
 		output, err := client.FilterLogEvents(ctx, input)
 		if err != nil {
-			return currentTS, fmt.Errorf("[%s] pollAndForwardLog FilterLogEvents: %w", gc.Name, err)
+			return currentTS, fmt.Errorf("[%s] pollAndForwardLog FilterLogEvents: %w",
+				wq.GroupConfig.Name, err)
 		}
 
 		if len(output.Events) == 0 {
@@ -86,21 +104,11 @@ func pollAndForwardLog(
 			}
 
 			select {
-			case logQueue <- event:
+			case wq.EventChan <- event:
 			case <-ctx.Done():
-				cm.Save(gc.Name, currentTS)
 				return currentTS, ctx.Err()
-			default:
-				log.Printf("[%s] Log events full: %s", gc.Name, time.UnixMilli(currentTS))
-				logQueue <- event
 			}
 		}
-
-		processed += len(output.Events)
-		cm.Save(gc.Name, currentTS)
-		log.Printf("[%s] Log events processed: %d@%s, next: %v",
-			gc.Name, processed, time.UnixMilli(currentTS), output.NextToken != nil)
-		processed = 0
 
 		// Pagination: if batch is large, follow the token
 		if output.NextToken == nil {
@@ -120,38 +128,83 @@ func pollAndForwardLog(
 	return currentTS, nil
 }
 
-func processLogWorker(
-	ctx context.Context, workerQueue chan types.FilteredLogEvent, gc GroupConfig, conf Config,
-) {
+func processLogWorker(ctx context.Context, wq *workerQueue) {
+	var (
+		flinkBatch []string
+		lastTS     int64
+	)
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
-		case event := <-workerQueue:
-			// Now Sentry and Vector slowness won't block the CloudWatch puller
-			processLogEvent(ctx, event, gc, conf)
+		case event := <-wq.EventChan:
+			raw := *event.Message
+			ts := *event.Timestamp
+			stream := *event.LogStreamName
+
+			switch wq.GroupConfig.Type {
+			case LogTypeFlink:
+				// Sentry: only ERROR/Exception
+				if wq.GroupConfig.SentryEnabled && wq.Config.SentryDSN != "" && isErrorMessage(raw) {
+					sendFlinkLogToSentry(raw, wq.Config.Env, wq.GroupConfig.Name, stream)
+				}
+
+				// Vector: all
+				if wq.GroupConfig.VectorEnabled && wq.Config.VectorEndpoint != "" {
+					m := buildFlinkLogToVector(wq.GroupConfig, raw, stream, ts)
+					data, _ := json.Marshal(m)
+					flinkBatch = append(flinkBatch, string(data))
+					lastTS = ts
+
+					if len(flinkBatch) >= 200 {
+						sendFlinkLogToVector(ctx, wq.Config, strings.Join(flinkBatch, "\n"))
+						wq.mu.Lock()
+						wq.Processed += int64(len(flinkBatch))
+						flinkBatch = flinkBatch[:0]
+						wq.mu.Unlock()
+
+						if *event.Timestamp > time.UnixMilli(wq.LastSaveTS).Add(10*time.Second).UnixMilli() {
+							wq.LastSaveTS = *event.Timestamp
+							saveCheckpoint(wq)
+						}
+					}
+				}
+			default:
+			}
+
+		case <-ticker.C:
+			if len(flinkBatch) > 0 {
+				sendFlinkLogToVector(ctx, wq.Config, strings.Join(flinkBatch, "\n"))
+				wq.mu.Lock()
+				wq.Processed += int64(len(flinkBatch))
+				wq.LastSaveTS = lastTS
+				flinkBatch = flinkBatch[:0]
+				wq.mu.Unlock()
+				saveCheckpoint(wq)
+			}
+
 		case <-ctx.Done():
+			if len(flinkBatch) > 0 {
+				sendFlinkLogToVector(ctx, wq.Config, strings.Join(flinkBatch, "\n"))
+				wq.mu.Lock()
+				wq.Processed += int64(len(flinkBatch))
+				wq.LastSaveTS = lastTS
+				flinkBatch = flinkBatch[:0]
+				wq.mu.Unlock()
+				saveCheckpoint(wq)
+			}
 			return
 		}
 	}
 }
 
-func processLogEvent(ctx context.Context, event types.FilteredLogEvent, gc GroupConfig, conf Config) {
-	raw := *event.Message
-	ts := *event.Timestamp
-	stream := *event.LogStreamName
-
-	switch gc.Type {
-	case LogTypeFlink:
-		// Sentry: only ERROR/Exception
-		if gc.SentryEnabled && conf.SentryDSN != "" && isErrorMessage(raw) {
-			sendFlinkLogToSentry(raw, conf.Env, gc.Name, stream)
-		}
-
-		// Vector: all
-		if gc.VectorEnabled && conf.VectorEndpoint != "" {
-			sendFlinkLogToVector(ctx, conf, gc, raw, stream, ts)
-		}
-	default:
-	}
+func saveCheckpoint(wq *workerQueue) {
+	wq.CheckpointManager.Save(wq.GroupConfig.Name, wq.LastSaveTS)
+	log.Printf("[%s] Log event processed: %d@%v",
+		wq.GroupConfig.Name, wq.Processed,
+		time.UnixMilli(wq.LastSaveTS))
 }
 
 func isErrorMessage(msg string) bool {
