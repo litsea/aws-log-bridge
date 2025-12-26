@@ -18,6 +18,11 @@ func StartLogWatcher(
 	lastTS := cm.Get(gc.Name)
 	log.Printf("[%s] Watcher started at: %v", gc.Name, time.UnixMilli(lastTS))
 
+	workerQueue := make(chan types.FilteredLogEvent, 10000)
+	for i := 0; i < 50; i++ {
+		go processLogWorker(ctx, workerQueue, gc, conf)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -26,7 +31,7 @@ func StartLogWatcher(
 		default:
 			// 1. Perform the sync work
 			// This call is synchronous. The loop waits here until it's finished.
-			newTS, err := pollAndForwardLog(ctx, cm, client, gc, conf, lastTS)
+			newTS, err := pollAndForwardLog(ctx, cm, client, workerQueue, gc, lastTS)
 			if err != nil {
 				log.Printf("[%s] Sync failed: %v", gc.Name, err)
 				// If AWS throttles or network is down, wait a bit longer before retrying
@@ -51,7 +56,7 @@ func StartLogWatcher(
 
 func pollAndForwardLog(
 	ctx context.Context, cm *CheckpointManager, client *cloudwatchlogs.Client,
-	gc GroupConfig, conf Config, lastTS int64,
+	logQueue chan types.FilteredLogEvent, gc GroupConfig, lastTS int64,
 ) (int64, error) {
 	input := &cloudwatchlogs.FilterLogEventsInput{
 		LogGroupName: &gc.Name,
@@ -80,7 +85,15 @@ func pollAndForwardLog(
 				currentTS = *event.Timestamp + 1
 			}
 
-			processLogEvent(ctx, event, gc, conf)
+			select {
+			case logQueue <- event:
+			case <-ctx.Done():
+				cm.Save(gc.Name, currentTS)
+				return currentTS, ctx.Err()
+			default:
+				log.Printf("[%s] Log events full: %s", gc.Name, time.UnixMilli(currentTS))
+				logQueue <- event
+			}
 		}
 
 		processed += len(output.Events)
@@ -105,6 +118,20 @@ func pollAndForwardLog(
 	}
 
 	return currentTS, nil
+}
+
+func processLogWorker(
+	ctx context.Context, workerQueue chan types.FilteredLogEvent, gc GroupConfig, conf Config,
+) {
+	for {
+		select {
+		case event := <-workerQueue:
+			// Now Sentry and Vector slowness won't block the CloudWatch puller
+			processLogEvent(ctx, event, gc, conf)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func processLogEvent(ctx context.Context, event types.FilteredLogEvent, gc GroupConfig, conf Config) {
