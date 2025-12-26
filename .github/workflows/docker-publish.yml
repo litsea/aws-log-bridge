@@ -1,0 +1,22 @@
+name: Docker Publish
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+jobs:
+  docker-publish:
+    # Sets the permissions granted to the GITHUB_TOKEN for the actions in this job.
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    uses: litsea/actions/.github/workflows/docker-publish.yml@main
+    secrets:
+      password: ${{ secrets.GITHUB_TOKEN }}
