@@ -37,7 +37,7 @@ func StartLogWatcher(
 		GroupConfig:       gc,
 		LastSaveTS:        lastTS,
 	}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		go processLogWorker(ctx, wq)
 	}
 
@@ -73,7 +73,7 @@ func StartLogWatcher(
 }
 
 func pollAndForwardLog(
-	ctx context.Context, cm *CheckpointManager, client *cloudwatchlogs.Client,
+	ctx context.Context, _ *CheckpointManager, client *cloudwatchlogs.Client,
 	wq *workerQueue, lastTS int64,
 ) (int64, error) {
 	input := &cloudwatchlogs.FilterLogEventsInput{
@@ -171,7 +171,7 @@ func processLogWorker(ctx context.Context, wq *workerQueue) {
 			if len(flinkBatch) > 0 {
 				sendFlinkLogToVector(ctx, wq.Config, strings.Join(flinkBatch, "\n"))
 				saveCheckpoint(wq, int64(len(flinkBatch)), lastTS)
-				flinkBatch = nil
+				flinkBatch = []string{}
 			}
 
 		case <-ctx.Done():
@@ -181,14 +181,13 @@ func processLogWorker(ctx context.Context, wq *workerQueue) {
 				cancel()
 
 				saveCheckpoint(wq, int64(len(flinkBatch)), lastTS)
-				flinkBatch = nil
 			}
 			return
 		}
 	}
 }
 
-func saveCheckpoint(wq *workerQueue, processed int64, lastTS int64) {
+func saveCheckpoint(wq *workerQueue, processed, lastTS int64) {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
 
