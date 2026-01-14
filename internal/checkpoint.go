@@ -40,7 +40,7 @@ func (cm *CheckpointManager) Save(group string, ts int64) {
 	// Ensure the data directory exists
 	dir := filepath.Dir(checkpointFile)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		_ = os.MkdirAll(dir, 0o755)
+		_ = os.MkdirAll(dir, 0o750)
 	}
 
 	// Fix: Save only the map to keep the JSON flat and readable
@@ -48,7 +48,7 @@ func (cm *CheckpointManager) Save(group string, ts int64) {
 
 	// Atomic write: write to .tmp then rename
 	tmpFile := checkpointFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o644); err == nil {
+	if err := os.WriteFile(tmpFile, data, 0o600); err == nil {
 		_ = os.Rename(tmpFile, checkpointFile)
 	}
 }
