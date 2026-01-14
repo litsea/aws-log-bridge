@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -93,7 +94,11 @@ func buildFlinkLogToVector(
 
 		// Fixed fields: level (mapping from Flink's messageType)
 		if l, ok := flinkRaw["messageType"]; ok {
-			finalMap["level"] = l
+			if s, ok := l.(string); ok {
+				finalMap["level"] = strings.ToUpper(s)
+			} else {
+				finalMap["level"] = l
+			}
 		} else {
 			finalMap["level"] = "INFO"
 		}
